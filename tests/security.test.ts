@@ -1,0 +1,12 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomBytes} from 'node:crypto';
+import {encrypt,decrypt,equal} from '../lib/security';
+import {countries,validatePortal,draftLetter} from '../lib/countries';
+process.env.VAULT_KEY=randomBytes(32).toString('base64');
+test('AES-GCM roundtrip and non-deterministic encryption',()=>{const a=encrypt('fixture secret'),b=encrypt('fixture secret');assert.notEqual(a,b);assert.equal(decrypt(a),'fixture secret');assert.equal(decrypt(b),'fixture secret');assert.ok(!a.includes('fixture secret'));});
+test('AES-GCM rejects tampered ciphertext',()=>{const parts=encrypt('fixture').split('.');const data=Buffer.from(parts[2],'base64url');data[0]^=1;parts[2]=data.toString('base64url');assert.throws(()=>decrypt(parts.join('.')));});
+test('secret comparison handles different lengths',()=>{assert.equal(equal('a','a'),true);assert.equal(equal('a','bb'),false);});
+test('portal allowlist rejects credentials, HTTP and hostname suffix tricks',()=>{assert.equal(validatePortal('https://www.mom.gov.sg/','www.mom.gov.sg'),'www.mom.gov.sg');for(const url of ['http://www.mom.gov.sg/','https://www.mom.gov.sg.attacker.test/','https://user:pass@www.mom.gov.sg/','https://www.mom.gov.sg:444/'])assert.throws(()=>validatePortal(url,'www.mom.gov.sg'));});
+test('eight profiles have bilingual review items and official entry sources',()=>{assert.equal(Object.keys(countries).length,8);for(const p of Object.values(countries)){assert.ok(p.bn);assert.ok(p.rules.length);for(const r of p.rules){assert.ok(r.en);assert.ok(r.bn);}assert.ok(p.sources.every(s=>s.startsWith('https://')));}});
+test('cover-letter draft never implies official certification',()=>{const text=draftLetter({id:'fixture',country:'sg',applicantName:'Test Applicant',visaType:'EP',portalUrl:'https://www.mom.gov.sg/',command:'Research only',status:'Idle',createdAt:'',updatedAt:'',documents:[],checklist:{}});assert.match(text,/DRAFT/);assert.match(text,/No employment, funds, eligibility, certification or approval is asserted/);});
