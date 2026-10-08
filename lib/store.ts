@@ -1,0 +1,13 @@
+import { Pool,type PoolClient } from 'pg';
+import {createHash} from 'node:crypto';
+import {encrypt,decrypt,env} from './security';
+import type {VisaCase} from '@/types/visa';
+let pool:Pool|undefined;
+export function db(){return pool??=new Pool({connectionString:env('DATABASE_URL'),max:5,connectionTimeoutMillis:8000,idleTimeoutMillis:10000});}
+export async function listCases():Promise<VisaCase[]>{const rows=await db().query('SELECT body FROM visa_cases ORDER BY updated_at DESC LIMIT 200');return rows.rows.map(r=>JSON.parse(decrypt(r.body)));}
+export async function getCase(id:string):Promise<VisaCase>{const r=await db().query('SELECT body FROM visa_cases WHERE id=$1',[id]);if(!r.rows[0])throw new Error('CASE_NOT_FOUND');return JSON.parse(decrypt(r.rows[0].body));}
+export async function saveCase(c:VisaCase){c.updatedAt=new Date().toISOString();await db().query('INSERT INTO visa_cases(id,body,updated_at) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET body=EXCLUDED.body,updated_at=EXCLUDED.updated_at',[c.id,encrypt(JSON.stringify(c)),c.updatedAt]);}
+export async function withCaseLock<T>(id:string,fn:()=>Promise<T>):Promise<T>{const client=await db().connect();try{const r=await client.query('SELECT pg_try_advisory_lock(hashtext($1)) AS acquired',['case:'+id]);if(!r.rows[0].acquired)throw new Error('CASE_BUSY');try{return await fn();}finally{await client.query('SELECT pg_advisory_unlock(hashtext($1))',['case:'+id]);}}finally{client.release();}}
+export async function saveKey(key:string){await db().query("INSERT INTO visa_secrets(name,value) VALUES('browser-use',$1) ON CONFLICT(name) DO UPDATE SET value=EXCLUDED.value",[encrypt(key)]);}
+export async function loadKey():Promise<string>{if(process.env.DATABASE_URL){const r=await db().query("SELECT value FROM visa_secrets WHERE name='browser-use'");if(r.rows[0])return decrypt(r.rows[0].value);}return env('BROWSER_USE_API_KEY');}
+export async function audit(action:string,caseId?:string){const client=await db().connect();try{await client.query('BEGIN');await client.query('SELECT pg_advisory_xact_lock(919190)');const r=await client.query('SELECT hash FROM visa_audit ORDER BY seq DESC LIMIT 1');const previous=r.rows[0]?.hash??'GENESIS';const ts=new Date().toISOString();const hash=createHash('sha256').update(JSON.stringify({previous,ts,action,caseId:caseId??null})).digest('hex');await client.query('INSERT INTO visa_audit(ts,action,case_id,previous_hash,hash) VALUES($1,$2,$3,$4,$5)',[ts,action,caseId??null,previous,hash]);await client.query('COMMIT');}catch(e){await client.query('ROLLBACK');throw e;}finally{client.release();}}
