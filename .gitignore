@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+.env*
+!.env.example
+.velovisa/
+.venv/
+__pycache__/
+*.pyc
+*.tsbuildinfo
