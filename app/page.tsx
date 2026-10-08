@@ -1,56 +1,357 @@
-'use client';
-import { useEffect, useRef, useState } from 'react';
-import { Bot, FileText, Globe2, KeyRound, Menu, Plus, Send, ShieldCheck, Upload, X } from 'lucide-react';
-import VisaCaseQueue from '@/components/VisaCaseQueue';
-import LiveBrowserView from '@/components/LiveBrowserView';
-import { COUNTRIES, countryProfile } from '@/lib/countries';
-import type { ConnectionInfo, CountryCode, VisaCase } from '@/types/visa';
+"use client";
 
-type Section = 'chat' | 'cases' | 'cloud' | 'settings';
+import { useState, useEffect, useRef } from "react";
+import { Send, Bot, Globe, Play, Square, Clock, CheckCircle, XCircle, Loader2, Plus, MessageSquare } from "lucide-react";
+
+type TaskStatus = "pending" | "running" | "completed" | "failed";
+
+interface LogEntry {
+  id: string;
+  timestamp: Date;
+  type: "info" | "action" | "result" | "error";
+  message: string;
+}
+
+interface Task {
+  id: string;
+  title: string;
+  prompt: string;
+  status: TaskStatus;
+  createdAt: Date;
+  logs: LogEntry[];
+  result?: string;
+}
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  taskId?: string;
+}
+
+const MOCK_STEPS = [
+  { type: "info" as const, message: "Initializing browser agent..." },
+  { type: "action" as const, message: "Navigating to target URL..." },
+  { type: "result" as const, message: "Page loaded successfully. Extracting content..." },
+  { type: "action" as const, message: "Clicking relevant links and scrolling..." },
+  { type: "result" as const, message: "Gathered key information from 3 pages." },
+  { type: "info" as const, message: "Summarizing findings..." },
+];
+
 export default function Home() {
-  const [bn,setBn]=useState(false), [section,setSection]=useState<Section>('chat'), [sidebar,setSidebar]=useState(false);
-  const [token,setToken]=useState(''), [authenticated,setAuthenticated]=useState(false), [busy,setBusy]=useState(false), [error,setError]=useState('');
-  const [cases,setCases]=useState<VisaCase[]>([]), [selected,setSelected]=useState(''), [connection,setConnection]=useState<ConnectionInfo>();
-  const [newCase,setNewCase]=useState(false), [country,setCountry]=useState<CountryCode>('au'), [name,setName]=useState(''), [passport,setPassport]=useState(''), [visa,setVisa]=useState('Skilled migration'), [portal,setPortal]=useState(COUNTRIES[0].portal), [record,setRecord]=useState(false);
-  const [command,setCommand]=useState(''), [key,setKey]=useState(''), [preview,setPreview]=useState<'form'|'checklist'>('checklist');
-  const [messages,setMessages]=useState<{role:string;text:string}[]>([]);
-  const stateRef=useRef({cases,busy}); stateRef.current={cases,busy};
-  const active=cases.find(c=>c.id===selected), profile=countryProfile(active?.country??country);
-  const t=(en:string,text:string)=>bn?text:en;
-  async function api<T>(body?:unknown, signal?:AbortSignal):Promise<T> {
-    const res=await fetch('/api/visa-agent',{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store',signal});
-    const data=await res.json(); if(!res.ok){const e=new Error(data.error??'Request failed') as Error&{retryMs?:number};e.retryMs=Math.max(5000,Number(res.headers.get('Retry-After')??5)*1000);throw e;} return data;
-  }
-  function merge(item:VisaCase){setCases(old=>old.some(c=>c.id===item.id)?old.map(c=>c.id===item.id?item:c):[item,...old]);}
-  async function load(){const data=await api<{cases:VisaCase[];connection:ConnectionInfo}>();setCases(data.cases);setConnection(data.connection);setSelected(old=>old||data.cases[0]?.id||'');setAuthenticated(true);}
-  useEffect(()=>{void load().catch(()=>{});},[]);
-  useEffect(()=>{document.documentElement.lang=bn?'bn':'en';},[bn]);
-  useEffect(()=>{
-    if(!authenticated)return;
-    let disposed=false, timer:ReturnType<typeof setTimeout>; const controller=new AbortController();
-    async function tick(){let delay=5000;for(const item of stateRef.current.cases){if(disposed||stateRef.current.busy)break;if(item.status!=='Running')continue;try{const data=await api<{item:VisaCase}>({action:'poll',id:item.id},controller.signal);if(!disposed)merge(data.item);if(data.item.run?.hasMore)delay=1000;}catch(e){if(!disposed){setError(e instanceof Error?e.message:'Polling failed');delay=(e as Error&{retryMs?:number}).retryMs??10000;}break;}}if(!disposed)timer=setTimeout(()=>void tick(),delay);}
-    timer=setTimeout(()=>void tick(),1000);return()=>{disposed=true;controller.abort();clearTimeout(timer);};
-  },[authenticated]);
-  async function perform(action:()=>Promise<void>){if(busy)return;setBusy(true);setError('');try{await action();}catch(e){setError(e instanceof Error?e.message:t('Operation failed','কাজটি ব্যর্থ হয়েছে'));}finally{setBusy(false);}}
-  async function login(e:React.FormEvent){e.preventDefault();await perform(async()=>{const res=await fetch('/api/visa-agent',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({action:'login'})});const data=await res.json();if(!res.ok)throw new Error(data.error);setToken('');await load();});}
-  async function create(){const data=await api<{item:VisaCase}>({action:'create',applicantName:name,passportNumber:passport,country,visaType:visa,portalUrl:portal,command:command||'Research official requirements and prepare an evidence checklist',record});merge(data.item);setSelected(data.item.id);setNewCase(false);return data.item;}
-  async function start(item:VisaCase){if(!window.confirm(t(`Start a paid Cloud research/preparation run for ${item.applicantName}? No visa submission or payment is authorized.`,` ${item.applicantName}-এর জন্য অর্থপ্রদ ক্লাউড গবেষণা শুরু করবেন? ভিসা জমা বা পেমেন্টের অনুমতি নয়।`)))return;const data=await api<{item:VisaCase}>({action:'start',id:item.id,approved:true});merge(data.item);setSection('cloud');setMessages(old=>[...old,{role:'assistant',text:t('Real Cloud run started. Watch progress and checkpoints in the preview.','ক্লাউড রান শুরু হয়েছে। প্রিভিউতে অগ্রগতি ও পর্যালোচনার ধাপ দেখুন।')}]);}
-  async function send(e:React.FormEvent){e.preventDefault();if(!command.trim())return;if(/[\u0980-\u09ff]|\b(amar|apnar|korun|korte|lagbe|visa chai|tobe)\b/i.test(command))setBn(true);setMessages(old=>[...old,{role:'user',text:command}]);await perform(async()=>{if(!active){setNewCase(true);return;}if(active.run)throw new Error(t('This case already has a run; use its checkpoint controls or create a new case.','এই কেসে রান রয়েছে। পর্যালোচনার বোতাম ব্যবহার করুন বা নতুন কেস তৈরি করুন।'));await start(active);});}
-  function mismatchWarnings(item:VisaCase){const warnings=item.documents.flatMap(d=>d.warnings);const numbers=new Set(item.documents.flatMap(d=>d.passportNumbers).map(v=>v.replace(/\s/g,'').toUpperCase()));if(numbers.size>1)warnings.push(t('Different passport numbers were extracted; human review required.','ভিন্ন পাসপোর্ট নম্বর পাওয়া গেছে; মানব পর্যালোচনা প্রয়োজন।'));if(item.passportNumber&&numbers.size&&!numbers.has(item.passportNumber.replace(/\s/g,'').toUpperCase()))warnings.push(t('Extracted passport number does not match the case.','নথির পাসপোর্ট নম্বর কেসের সঙ্গে মেলে না।'));return warnings;}
-  async function upload(file:File){if(!active)return;await perform(async()=>{const form=new FormData();form.set('id',active.id);form.set('file',file);const res=await fetch('/api/documents',{method:'POST',body:form});const data=await res.json();if(!res.ok)throw new Error(data.error);merge(data.item);});}
-  function coverLetter(){if(!active)return;t('','');setPreview('form');const text=[t('DRAFT — operator review required','খসড়া — অপারেটরের পর্যালোচনা প্রয়োজন'),new Date().toLocaleDateString(),t('To the Visa Officer','ভিসা কর্মকর্তার প্রতি'),`${active.applicantName} — ${active.visaType} — ${bn?profile.bn:profile.name}`,t('Please review the accompanying application evidence. This draft must be completed with the applicant’s verified purpose, dates, funding and supporting documents before use.','সংযুক্ত আবেদনের প্রমাণ পর্যালোচনা করুন। ব্যবহারের আগে আবেদনকারীর যাচাইকৃত উদ্দেশ্য, তারিখ, অর্থায়ন ও সহায়ক নথি দিয়ে এই খসড়া সম্পূর্ণ করতে হবে।'),...active.documents.map(d=>d.filename),t('No visa outcome or eligibility is asserted.','কোনো ভিসার ফলাফল বা যোগ্যতা দাবি করা হচ্ছে না।')].join('\n\n');const blob=new Blob([text],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='velovisa-cover-letter-draft.txt';a.click();URL.revokeObjectURL(url);}
-  const labels:Record<Section,string>={chat:t('AI Assistance Chat','AI সহায়তা চ্যাট'),cases:t('Visa Case Workspace','ভিসা কেস ওয়ার্কস্পেস'),cloud:t('Browser Use Cloud v4','Browser Use ক্লাউড v4'),settings:t('Connections & API keys','সংযোগ ও API কী')};
-  return <main className="min-h-screen bg-white text-zinc-900"><header className="safe-top sticky top-0 z-20 border-b border-zinc-200 bg-white"><div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 lg:px-7"><div className="flex items-center gap-3"><button aria-label="Navigation" className="lg:hidden" onClick={()=>setSidebar(!sidebar)}><Menu size={20}/></button><ShieldCheck size={25}/><div><h1 className="font-semibold tracking-tight">VeloVisa AI</h1><p className="text-xs text-zinc-500">{t('Visa Intelligence Engine','ভিসা ইন্টেলিজেন্স ইঞ্জিন')}</p></div></div><div className="flex items-center gap-3"><span className="hidden rounded-full border border-zinc-200 px-3 py-1 text-xs sm:block">{connection?.connected?t('Cloud API v4 Active','ক্লাউড API v4 সক্রিয়'):t('Cloud not verified','ক্লাউড যাচাই হয়নি')}</span><button className="secondary" onClick={()=>setBn(!bn)}>{bn?'English':'বাংলা'}</button><button className="primary" disabled={!authenticated} onClick={()=>setNewCase(true)}><Plus size={15}/>{t('New case','নতুন কেস')}</button></div></div></header>
-    {!authenticated?<div className="mx-auto max-w-lg p-6"><form onSubmit={login} className="card space-y-4 p-6"><KeyRound/><h2 className="text-xl font-semibold">{t('Connect your agency workspace','আপনার এজেন্সি ওয়ার্কস্পেস যুক্ত করুন')}</h2><p className="text-sm text-zinc-500">{t('Enter DASHBOARD_ACCESS_TOKEN. Your Cloud API key stays on the server.','DASHBOARD_ACCESS_TOKEN দিন। ক্লাউড API কী সার্ভারেই থাকবে।')}</p><input aria-label="Agency access token" className="field" type="password" autoComplete="off" required value={token} onChange={e=>setToken(e.target.value)}/><button disabled={busy} className="primary">{t('Sign in','সাইন ইন')}</button>{error&&<p role="alert" className="text-sm text-red-700">{error}</p>}</form></div>:<div className="flex"><aside className={`${sidebar?'fixed inset-0 z-30 bg-white p-5':'hidden'} safe-bottom w-72 shrink-0 border-r border-zinc-200 lg:sticky lg:top-20 lg:block lg:h-[calc(100vh-80px)] lg:p-5`}><button aria-label="Close navigation" className="mb-4 lg:hidden" onClick={()=>setSidebar(false)}><X/></button><nav className="space-y-1">{(['chat','cases','cloud','settings'] as Section[]).map(s=><button key={s} className={`flex w-full items-center gap-2 rounded-lg p-3 text-left text-sm ${section===s?'bg-zinc-100 font-semibold':'hover:bg-zinc-50'}`} onClick={()=>{setSection(s);setSidebar(false);}}>{s==='chat'?<Bot size={16}/>:s==='cases'?<FileText size={16}/>:s==='cloud'?<Globe2 size={16}/>:<KeyRound size={16}/>} {labels[s]}</button>)}</nav><div className="mt-6"><VisaCaseQueue cases={cases} selected={selected} select={id=>{setSelected(id);setSidebar(false);}} bn={bn}/></div><div className="mt-5 space-y-2 text-xs text-zinc-500"><p>{t('Reported latest-run cost','সর্বশেষ রানের রিপোর্টকৃত খরচ')}: {active?.run?.costUsd?`$${active.run.costUsd}`:'—'}</p><p>{t('Credits: see provider dashboard','ক্রেডিট: প্রদানকারীর ড্যাশবোর্ড দেখুন')}</p><a href="https://cloud.browser-use.com" target="_blank" rel="noopener noreferrer" className="underline">Browser Use Cloud</a><button className="block underline" onClick={()=>void perform(async()=>{await api({action:'logout'});setAuthenticated(false);setCases([]);setMessages([]);setConnection(undefined);})}>{t('Sign out','সাইন আউট')}</button></div></aside><div className="safe-bottom min-w-0 flex-1 p-4 lg:p-7">
-    {error&&<div role="alert" className="mb-4 flex justify-between rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800"><span>{error}</span><button aria-label="Dismiss" onClick={()=>setError('')}><X size={16}/></button></div>}
-    <div className="mb-5 flex flex-wrap justify-between gap-3"><div><h2 className="text-xl font-semibold">{labels[section]}</h2><p className="mt-1 text-xs text-zinc-500">{active?`${active.applicantName} · ${bn?profile.bn:profile.name}`:t('Choose or create a visa case','একটি ভিসা কেস নির্বাচন বা তৈরি করুন')}</p></div><span className="text-xs text-zinc-500">{t('Residential proxy','রেসিডেনশিয়াল প্রক্সি')}: {(active?.country??country).toUpperCase()} {t('(requested)','(অনুরোধকৃত)')}</span></div>
-    {section==='settings'?<div className="grid gap-5 xl:grid-cols-2"><section className="card space-y-4 p-5"><h3 className="font-semibold">Browser Use Cloud v4</h3><p className="text-sm text-zinc-500">{connection?.keyConfigured?t('A server-side key is configured; test to verify.','সার্ভারে কী সেট করা আছে; যাচাই করতে পরীক্ষা করুন।'):t('No Cloud key configured.','ক্লাউড কী সেট করা নেই।')}</p><a className="text-sm underline" href="https://cloud.browser-use.com/settings?tab=api-keys&new=1" target="_blank" rel="noopener noreferrer">{t('Create a Cloud API key','ক্লাউড API কী তৈরি করুন')}</a><input aria-label="Browser Use API key" type="password" autoComplete="off" className="field" placeholder="bu_…" value={key} onChange={e=>setKey(e.target.value)}/><div className="flex flex-wrap gap-2"><button className="primary" disabled={busy||!key.startsWith('bu_')} onClick={()=>void perform(async()=>{if(!window.confirm(t('Store this API key in the encrypted server vault?','এই API কী এনক্রিপ্ট করা সার্ভার ভল্টে সংরক্ষণ করবেন?')))return;await api({action:'saveKey',key,approved:true});setKey('');await load();})}>{t('Save encrypted key','এনক্রিপ্ট করে কী সংরক্ষণ')}</button><button className="secondary" disabled={busy} onClick={()=>void perform(async()=>{const result=await api<{connected:boolean;message:string}>({action:'test'});setConnection(old=>old?{...old,...result}:undefined);})}>{t('Test connection','সংযোগ পরীক্ষা')}</button></div><p className="text-xs leading-5 text-zinc-500">{t('Keys are encrypted with AES-256-GCM on persistent server disk. Never stored in localStorage. This is a single-agency vault.','কী স্থায়ী সার্ভার ডিস্কে AES-256-GCM দিয়ে এনক্রিপ্ট করা হয়। localStorage-এ রাখা হয় না। এটি এক এজেন্সির ভল্ট।')}</p></section><section className="card space-y-3 p-5"><h3 className="font-semibold">Python · LangGraph · Playwright</h3><p className="text-sm">{connection?.pythonConfigured?t('Python service configured (not yet health-verified)','Python সার্ভিস সেট করা আছে (স্বাস্থ্য যাচাই হয়নি)'):t('Configure PYTHON_BACKEND_URL and PYTHON_SERVICE_TOKEN','PYTHON_BACKEND_URL এবং PYTHON_SERVICE_TOKEN সেট করুন')}</p><pre className="overflow-auto rounded-lg border border-zinc-200 p-3 text-xs">pip install --upgrade -r backend/requirements.txt{'\n'}uvicorn backend.main:app --host 127.0.0.1 --port 8000</pre><p className="text-xs text-zinc-500">{t('See README for Tesseract OCR, LibreOffice conversion and the authorized Python CDP worker. No arbitrary-code execution endpoint is exposed.','Tesseract OCR, LibreOffice ও অনুমোদিত Python CDP ওয়ার্কার চালাতে README দেখুন। ইচ্ছেমতো কোড চালানোর API নেই।')}</p></section></div>:<div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]"><div className="min-w-0 space-y-5">
-      {section==='chat'&&<section className="card flex min-h-[420px] flex-col"><div className="flex-1 space-y-4 p-5"><p className="text-sm leading-6 text-zinc-600">{t('One command starts real official-source research and preparation for the selected case. Final legal submission is never automatic.','একটি নির্দেশে নির্বাচিত কেসের সরকারি তথ্য গবেষণা ও প্রস্তুতি শুরু হয়। চূড়ান্ত আইনি আবেদন স্বয়ংক্রিয়ভাবে জমা হয় না।')}</p>{messages.map((m,i)=><div key={i} className={`rounded-xl p-3 text-sm leading-6 ${m.role==='user'?'ml-8 bg-zinc-100':'mr-8 border border-zinc-200'}`}>{m.text}</div>)}</div><form className="flex items-end gap-2 border-t border-zinc-200 p-4" onSubmit={send}><textarea aria-label={t('Command','নির্দেশ')} className="field min-h-20" value={command} onChange={e=>setCommand(e.target.value)} placeholder={t('Research this pathway and prepare my checklist…','এই ভিসা পথের তথ্য ও নথির তালিকা প্রস্তুত করুন…')}/><button className="primary" aria-label="Send command" disabled={busy||!command.trim()}><Send size={17}/></button></form></section>}
-      {(section==='cloud'||section==='cases')&&<LiveBrowserView run={active?.run} busy={busy} bn={bn} onResume={otp=>void perform(async()=>{if(!active||!window.confirm(t('Start a paid continuation and verify the authorized OTP if supplied?','অর্থপ্রদ পরবর্তী রান ও প্রদত্ত অনুমোদিত OTP যাচাই শুরু করবেন?')))return;const data=await api<{item:VisaCase}>({action:'resume',id:active.id,otp,approved:true});merge(data.item);})} onStop={()=>void perform(async()=>{if(!active||!window.confirm(t('Cancel this run and stop managed browsers?','রান বাতিল ও ক্লাউড ব্রাউজার বন্ধ করবেন?')))return;const data=await api<{item:VisaCase}>({action:'stop',id:active.id,approved:true});merge(data.item);})}/>}
-      {active&&<section className="card space-y-3 p-5"><div className="flex flex-wrap justify-between gap-2"><h3 className="font-semibold">{t('Documents & consistency','নথি ও সামঞ্জস্য')}</h3><label className="secondary cursor-pointer"><Upload size={14}/>{t('Upload','আপলোড')}<input type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" className="hidden" disabled={busy} onChange={e=>{const file=e.target.files?.[0];if(file)void upload(file);e.target.value='';}}/></label></div><p className="text-xs text-zinc-500">PDF · DOC · DOCX · JPG · PNG · 10 MB</p>{active.documents.map((d,i)=><details key={i} className="rounded-lg border border-zinc-200 p-3"><summary className="text-sm">{d.filename} · {d.extractionMethod}</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs">{d.text.slice(0,8000)}</pre></details>)}{mismatchWarnings(active).map((w,i)=><p key={i} className="text-xs text-amber-800">{w}</p>)}<button className="secondary" onClick={coverLetter}>{t('Export cover-letter draft','কভার লেটারের খসড়া রপ্তানি')}</button><p className="text-xs text-zinc-500">{t('Extraction is not certification. Scanned PDFs may require separate OCR review.','তথ্য সংগ্রহ প্রত্যয়ন নয়। স্ক্যান করা PDF আলাদা OCR পর্যালোচনা চাইতে পারে।')}</p></section>}
-      {active?.run&&<section className="card p-5"><h3 className="mb-3 font-semibold">{t('Real event timeline','বাস্তব ইভেন্টের সময়রেখা')}</h3><div className="max-h-48 space-y-2 overflow-auto">{active.run.events.map(ev=><p key={`${active.run!.id}-${ev.id}`} className="font-mono text-[11px] text-zinc-500">{new Date(ev.ts).toLocaleTimeString()} · {ev.type}</p>)}</div></section>}
-    </div><div className="min-w-0 space-y-5"><section className="card p-5"><div className="mb-4 flex flex-wrap gap-2"><button className={preview==='form'?'primary':'secondary'} onClick={()=>setPreview('form')}>{t('Live form view','ফর্ম প্রিভিউ')}</button><button className={preview==='checklist'?'primary':'secondary'} onClick={()=>setPreview('checklist')}>{t('Structural checklist','নথির চেকলিস্ট')}</button></div>{preview==='form'?<dl className="space-y-3 text-sm"><div><dt className="text-zinc-500">{t('Applicant','আবেদনকারী')}</dt><dd>{active?.applicantName??'—'}</dd></div><div><dt className="text-zinc-500">{t('Visa pathway','ভিসার পথ')}</dt><dd>{active?.visaType??'—'}</dd></div><div><dt className="text-zinc-500">{t('Official portal','সরকারি পোর্টাল')}</dt><dd className="break-all">{active?.portalUrl??profile.portal}</dd></div><p className="text-xs text-zinc-500">{t('Local case preview, not proof of portal form filling.','এটি স্থানীয় কেস প্রিভিউ; সরকারি ফর্ম পূরণের প্রমাণ নয়।')}</p></dl>:<div className="space-y-3">{profile.checks.map(check=><label key={check.id} className="flex gap-2 text-sm leading-5"><input type="checkbox" className="mt-1" checked={active?.checks[check.id]??false} disabled={!active||busy} onChange={e=>void perform(async()=>{if(!active)return;const data=await api<{item:VisaCase}>({action:'check',id:active.id,check:check.id,value:e.target.checked});merge(data.item);})}/>{bn?check.bn:check.en}</label>)}<p className="rounded-lg bg-amber-50 p-3 text-xs leading-5 text-amber-900">{t('Pathway-specific review is mandatory. These checks are not universal legal requirements. Australia IELTS 7 is proficient, not a universal minimum; Singapore C2 verification is conditional.','ভিসা পথ অনুযায়ী পর্যালোচনা আবশ্যক। এগুলো সব ভিসার বাধ্যতামূলক আইন নয়। অস্ট্রেলিয়ায় IELTS 7 সর্বজনীন ন্যূনতম নয়; সিঙ্গাপুরের C2 যাচাই শর্তসাপেক্ষ।')}</p><p className="text-xs text-zinc-500">{t('Proposed document blueprints','প্রস্তাবিত নথির কাঠামো')}: {profile.blueprints.join(' · ')}</p>{profile.sources.map(url=><a key={url} className="block break-all text-xs underline" href={url} target="_blank" rel="noopener noreferrer">{url}</a>)}</div>}<div className="mt-5 flex flex-wrap gap-2">{active&&!active.run&&<button className="primary" disabled={busy} onClick={()=>void perform(()=>start(active))}>{t('Start preparation','প্রস্তুতি শুরু')}</button>}<button className="secondary" disabled={!active||busy} onClick={()=>void perform(async()=>{if(active)await api({action:'approve',id:active.id});})}>{t('Check dispatch readiness','জমা দেওয়ার প্রস্তুতি পরীক্ষা')}</button></div><p className="mt-3 text-xs text-zinc-500">{t('Real submission is locked until a tested portal-specific adapter exists. No approval probability is fabricated.','পরীক্ষিত পোর্টাল-নির্দিষ্ট অ্যাডাপ্টার না থাকলে প্রকৃত আবেদন জমা বন্ধ থাকে। অনুমোদনের সম্ভাবনা বানানো হয় না।')}</p></section><section className="card p-5"><h3 className="mb-3 font-semibold">{t('Verified JSON output','যাচাইকৃত JSON ফলাফল')}</h3><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-zinc-200 p-3 font-mono text-xs leading-5 text-zinc-700">{JSON.stringify(active?.run?.result??{data:null,message:t('No verified result yet','এখনো যাচাইকৃত ফলাফল নেই')},null,2)}</pre></section></div></div>}
-    </div></div>}
-    {newCase&&<div className="fixed inset-0 z-40 flex items-center justify-center bg-zinc-900/20 p-4"><section role="dialog" aria-modal="true" aria-labelledby="new-case-heading" className="safe-bottom card max-h-[90vh] w-full max-w-lg overflow-y-auto p-6 shadow-xl"><div className="flex justify-between"><h2 id="new-case-heading" className="text-lg font-semibold">{t('New visa case','নতুন ভিসা কেস')}</h2><button aria-label="Close" onClick={()=>setNewCase(false)}><X/></button></div><form className="mt-5 space-y-3" onSubmit={e=>{e.preventDefault();void perform(async()=>{await create();setSection('cases');});}}><label className="block text-sm">{t('Applicant name','আবেদনকারীর নাম')}<input className="field mt-1" required value={name} onChange={e=>setName(e.target.value)}/></label><label className="block text-sm">{t('Passport number (optional)','পাসপোর্ট নম্বর (ঐচ্ছিক)')}<input className="field mt-1" value={passport} onChange={e=>setPassport(e.target.value)}/></label><label className="block text-sm">{t('Country','দেশ')}<select className="field mt-1" value={country} onChange={e=>{const code=e.target.value as CountryCode;setCountry(code);setPortal(countryProfile(code).portal);setVisa(countryProfile(code).pathway);}}>{COUNTRIES.map(c=><option key={c.code} value={c.code}>{bn?c.bn:c.name}</option>)}</select></label><label className="block text-sm">{t('Visa pathway','ভিসার পথ')}<input className="field mt-1" required value={visa} onChange={e=>setVisa(e.target.value)}/></label><label className="block text-sm">{t('Authorized portal URL','অনুমোদিত পোর্টাল URL')}<input className="field mt-1" type="url" required value={portal} onChange={e=>setPortal(e.target.value)}/></label><label className="block text-sm">{t('Research / preparation command','গবেষণা / প্রস্তুতির নির্দেশ')}<textarea className="field mt-1" value={command} onChange={e=>setCommand(e.target.value)} placeholder={t('Find official requirements','সরকারি শর্ত খুঁজুন')}/></label><label className="flex gap-2 text-xs leading-5"><input type="checkbox" checked={record} onChange={e=>setRecord(e.target.checked)}/>{t('Record browser with applicant consent; recordings may include personal data.','আবেদনকারীর সম্মতিতে ব্রাউজার রেকর্ড করুন; ব্যক্তিগত তথ্য থাকতে পারে।')}</label><button className="primary w-full" disabled={busy}>{t('Create case (no paid run)','কেস তৈরি করুন (পেইড রান নয়)')}</button></form></section></div>}
-  </main>;
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      content: "Hello! I'm your autonomous browsing agent assistant. Describe a web research or browsing task, and I'll run an agent to complete it while you monitor the progress.",
+    },
+  ]);
+  const [input, setInput] = useState("");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [tasks, selectedTaskId]);
+
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId);
+
+  const startAgentTask = (prompt: string) => {
+    const taskId = `task-${Date.now()}`;
+    const newTask: Task = {
+      id: taskId,
+      title: prompt.slice(0, 50) + (prompt.length > 50 ? "..." : ""),
+      prompt,
+      status: "running",
+      createdAt: new Date(),
+      logs: [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date(),
+          type: "info",
+          message: `Task started: "${prompt}"`,
+        },
+      ],
+    };
+
+    setTasks((prev) => [newTask, ...prev]);
+    setSelectedTaskId(taskId);
+
+    setMessages((prev) => [
+      ...prev,
+      { id: `msg-user-${Date.now()}`, role: "user", content: prompt },
+      {
+        id: `msg-asst-${Date.now()}`,
+        role: "assistant",
+        content: `Starting autonomous browsing agent for your task. You can monitor progress in the panel on the right.`,
+        taskId,
+      },
+    ]);
+
+    // Simulate agent steps
+    let step = 0;
+    const interval = setInterval(() => {
+      if (step >= MOCK_STEPS.length) {
+        clearInterval(interval);
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.id === taskId
+              ? {
+                  ...t,
+                  status: "completed",
+                  result: `Successfully completed the browsing task.\n\nSummary of findings based on your request: "${prompt}"\n\n• Key pages visited and analyzed.\n• Relevant data extracted.\n• Task finished without errors.`,
+                  logs: [
+                    ...t.logs,
+                    {
+                      id: `log-final-${Date.now()}`,
+                      timestamp: new Date(),
+                      type: "result",
+                      message: "Agent finished successfully.",
+                    },
+                  ],
+                }
+              : t
+          )
+        );
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `msg-done-${Date.now()}`,
+            role: "assistant",
+            content: `✅ Task completed! Check the monitoring panel for full logs and the summary result.`,
+            taskId,
+          },
+        ]);
+        return;
+      }
+
+      const currentStep = MOCK_STEPS[step];
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId
+            ? {
+                ...t,
+                logs: [
+                  ...t.logs,
+                  {
+                    id: `log-${Date.now()}-${step}`,
+                    timestamp: new Date(),
+                    type: currentStep.type,
+                    message: currentStep.message,
+                  },
+                ],
+              }
+            : t
+        )
+      );
+      step++;
+    }, 1800);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+    startAgentTask(input.trim());
+    setInput("");
+  };
+
+  const statusIcon = (status: TaskStatus) => {
+    switch (status) {
+      case "running":
+        return <Loader2 className="w-4 h-4 animate-spin text-blue-400" />;
+      case "completed":
+        return <CheckCircle className="w-4 h-4 text-green-400" />;
+      case "failed":
+        return <XCircle className="w-4 h-4 text-red-400" />;
+      default:
+        return <Clock className="w-4 h-4 text-gray-400" />;
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-[#0f0f0f] text-gray-100">
+      {/* Sidebar */}
+      <div
+        className={`${
+          isSidebarOpen ? "w-64" : "w-0"
+        } bg-[#171717] border-r border-gray-800 flex flex-col transition-all overflow-hidden`}
+      >
+        <div className="p-4 border-b border-gray-800">
+          <button
+            onClick={() => {
+              setSelectedTaskId(null);
+              setMessages([
+                {
+                  id: "welcome",
+                  role: "assistant",
+                  content:
+                    "Hello! I'm your autonomous browsing agent assistant. Describe a web research or browsing task, and I'll run an agent to complete it while you monitor the progress.",
+                },
+              ]);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-700 hover:bg-gray-800 transition"
+          >
+            <Plus className="w-4 h-4" />
+            New chat
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2">
+          <div className="text-xs text-gray-500 px-2 py-1 uppercase tracking-wider">Recent tasks</div>
+          {tasks.map((task) => (
+            <button
+              key={task.id}
+              onClick={() => setSelectedTaskId(task.id)}
+              className={`w-full text-left px-3 py-2 rounded-lg mb-1 flex items-start gap-2 hover:bg-gray-800 transition ${
+                selectedTaskId === task.id ? "bg-gray-800" : ""
+              }`}
+            >
+              {statusIcon(task.status)}
+              <div className="flex-1 min-w-0">
+                <div className="text-sm truncate">{task.title}</div>
+                <div className="text-xs text-gray-500">{task.createdAt.toLocaleTimeString()}</div>
+              </div>
+            </button>
+          ))}
+          {tasks.length === 0 && (
+            <div className="text-sm text-gray-500 px-3 py-4">No tasks yet</div>
+          )}
+        </div>
+      </div>
+
+      {/* Main chat area */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="h-14 border-b border-gray-800 flex items-center px-4 gap-3">
+          <button
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="p-2 hover:bg-gray-800 rounded-lg"
+          >
+            <MessageSquare className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-2">
+            <Globe className="w-5 h-5 text-blue-400" />
+            <span className="font-semibold">Agent Browser</span>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-6">
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}
+            >
+              {msg.role === "assistant" && (
+                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center flex-shrink-0">
+                  <Bot className="w-5 h-5" />
+                </div>
+              )}
+              <div
+                className={`max-w-[70%] rounded-2xl px-4 py-3 ${
+                  msg.role === "user"
+                    ? "bg-blue-600 text-white"
+                    : "bg-[#1e1e1e] border border-gray-800"
+                }`}
+              >
+                <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+              </div>
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-4 border-t border-gray-800">
+          <div className="max-w-3xl mx-auto relative">
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Describe a browsing task (e.g. Research latest AI news on TechCrunch)..."
+              className="w-full bg-[#1e1e1e] border border-gray-700 rounded-xl px-4 py-3 pr-12 text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              type="submit"
+              disabled={!input.trim()}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 text-center mt-2">
+            Agents run autonomously. Monitor live logs in the side panel.
+          </p>
+        </form>
+      </div>
+
+      {/* Monitoring panel */}
+      <div className="w-96 border-l border-gray-800 bg-[#141414] flex flex-col">
+        <div className="h-14 border-b border-gray-800 flex items-center px-4 gap-2">
+          <Play className="w-4 h-4 text-green-400" />
+          <span className="font-medium text-sm">Task Monitor</span>
+        </div>
+
+        {selectedTask ? (
+          <>
+            <div className="p-4 border-b border-gray-800">
+              <div className="flex items-center gap-2 mb-2">
+                {statusIcon(selectedTask.status)}
+                <span className="text-sm font-medium capitalize">{selectedTask.status}</span>
+              </div>
+              <p className="text-sm text-gray-300">{selectedTask.prompt}</p>
+              <p className="text-xs text-gray-500 mt-1">
+                Started {selectedTask.createdAt.toLocaleString()}
+              </p>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Live logs</div>
+              {selectedTask.logs.map((log) => (
+                <div key={log.id} className="text-xs">
+                  <div className="flex items-center gap-2 text-gray-500 mb-0.5">
+                    <span>{log.timestamp.toLocaleTimeString()}</span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] uppercase ${
+                        log.type === "action"
+                          ? "bg-blue-900/50 text-blue-300"
+                          : log.type === "result"
+                          ? "bg-green-900/50 text-green-300"
+                          : log.type === "error"
+                          ? "bg-red-900/50 text-red-300"
+                          : "bg-gray-800 text-gray-400"
+                      }`}
+                    >
+                      {log.type}
+                    </span>
+                  </div>
+                  <p className="text-gray-300">{log.message}</p>
+                </div>
+              ))}
+              <div ref={logsEndRef} />
+            </div>
+
+            {selectedTask.result && (
+              <div className="p-4 border-t border-gray-800 bg-[#1a1a1a]">
+                <div className="text-xs text-gray-500 uppercase tracking-wider mb-2">Result</div>
+                <pre className="text-sm text-gray-200 whitespace-pre-wrap font-sans">
+                  {selectedTask.result}
+                </pre>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-gray-500 text-sm p-8 text-center">
+            <div>
+              <Globe className="w-10 h-10 mx-auto mb-3 opacity-40" />
+              <p>Select a task or start a new one to monitor agent progress here.</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

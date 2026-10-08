@@ -1,9 +1,0 @@
-node_modules/
-.next/
-.env*
-!.env.example
-.venv/
-__pycache__/
-*.pyc
-*.tsbuildinfo
-backend/uploads/
